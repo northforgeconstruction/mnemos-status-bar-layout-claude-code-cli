@@ -79,7 +79,9 @@ if [ -f "${CWD}/.phase.json" ] && command -v jq >/dev/null 2>&1; then
     *)            PHASE_EMOJI="" ;;
   esac
   if [ -n "$PHASE_EMOJI" ]; then
-    PHASE_SEG="${PHASE_EMOJI} ${PHASE^}"
+    # bash-3.2-safe capitalization (macOS stock bash; ${var^} needs bash 4+)
+    PHASE_CAP="$(printf '%s' "${PHASE:0:1}" | tr '[:lower:]' '[:upper:]')${PHASE:1}"
+    PHASE_SEG="${PHASE_EMOJI} ${PHASE_CAP}"
     [ -n "$TICKET" ] && [ "$TICKET" != "null" ] && PHASE_SEG="${PHASE_SEG} · ${TICKET}"
   fi
 fi
@@ -149,6 +151,14 @@ SEGMENTS+=("🌿 ${BRANCH}")
 [ -n "$SESSION_SEG" ] && SEGMENTS+=("$SESSION_SEG")
 [ -n "$AGENT_SEG" ] && SEGMENTS+=("$AGENT_SEG")
 
-# Join with " │ "
-IFS=" │ "
-echo "${SEGMENTS[*]}"
+# Join with " │ " (manual loop: ${arr[*]} joins with first IFS char only,
+# and │ is multibyte so it can't be an IFS character)
+LINE=""
+for SEG in "${SEGMENTS[@]}"; do
+  if [ -z "$LINE" ]; then
+    LINE="$SEG"
+  else
+    LINE="${LINE} │ ${SEG}"
+  fi
+done
+echo "$LINE"
