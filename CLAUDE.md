@@ -33,7 +33,7 @@ This repo is the **Claude Code CLI** variant. Future harnesses (Claude Desktop, 
 
 ## Current focus
 
-Phase: 🚀 **deploy** (MNEM-75). All three surfaces shipped: statusline (two-line, wired via /statusline), SwiftBar v0.2 (multi-project), vault panel (00-PORTFOLIO.md). Repo enrolled in MNEMOS (snapshot-before-compaction live). Next: observe real usage, then → maintenance.
+Phase: 🚀 **deploy** (MNEM-83 — go-live record; MNEM-75 is the unrelated PreToolUse agent-tracking ticket that early commits mistakenly referenced). All three surfaces shipped: statusline (two-line, wired via /statusline), SwiftBar v0.2 (multi-project), vault panel (00-PORTFOLIO.md). Repo enrolled in MNEMOS (snapshot-before-compaction live). Next: observe real usage, then → maintenance.
 
 ## Mode by phase (auto-enforce)
 
