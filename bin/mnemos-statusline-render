@@ -1,164 +1,290 @@
 #!/usr/bin/env bash
-# mnemos-statusline-render — renders the MNEMOS-aware statusline for
-# Claude Code CLI. Point Claude Code's /statusline at this script.
+# mnemos-statusline-render — two-line MNEMOS-aware statusline for Claude Code CLI.
 #
-# Output format (single line, pipe-separated segments):
-#   🤖 <model> │ 📁 <folder> │ 🌿 <branch> │ <phase> │ 🧠 <snaps>·<ctx> │ ⏱ <session> │ <agent>
+# Line 1 (where am I):
+#   🤖 <model> │ 📁 <folder> │ 🌿 <branch> │ <phase> · <since> (<age>) · <ticket>
+# Line 2 (budget + state):
+#   69K/1M 7% │ 5h 12%·13:10 │ 7d 20%·Mon 15 │ 🧠 4·18K │ ⏱ 2h 14m │ 💰 $0.42 89%c │ 🔍 Explore
+#
+# Layout, colors, and glyphs per docs/DESIGN_SYSTEM.md (terminal line-1/line-2
+# components). bash-3.2-safe — macOS stock bash has no ${var^}/${var,,}.
 #
 # Works in ANY directory — not just MNEMOS-enrolled ones. Degrades gracefully:
-# fields with no data show "—" or are omitted.
+# labeled fields show "—", unlabeled fields are omitted.
 #
 # Configuration in Claude Code:
 #   /statusline → choose "Custom command" → paste this path:
 #     ~/.local/bin/mnemos-statusline-render
 #
 # Reads (when available):
+#   - stdin JSON from Claude Code — model, cwd, context_window, cost, rate_limits
 #   - $PWD/.phase.json — current phase + ticket + start timestamp
 #   - ~/.mnemos/cache/<project>/latest.json — snapshot + tokens
 #   - ~/.mnemos/cache/<project>/history/ — snapshot count
 #   - ~/.mnemos/cache/<project>/session-start.timestamp — session age
 #   - ~/.mnemos/cache/<project>/active-agent.json — active agent
+#   - /tmp/claude-statusline-usage.json — 60s rate-limit cache (shared with
+#     the previous statusline.sh; same {rate_limits:...} shape)
 
 set -uo pipefail
 
 MNEMOS_HOME="${MNEMOS_HOME:-${HOME}/.mnemos}"
+RATE_CACHE="/tmp/claude-statusline-usage.json"
+NOW=$(date "+%s")
 
-# Read Claude Code's input (statusline scripts receive JSON via stdin)
+# ── Design tokens (256-color, per DESIGN_SYSTEM.md) ─────────────────────
+RESET=$'\033[0m'
+c256() { printf '\033[38;5;%dm' "$1"; }
+NAVY="$(c256 24)"     # --navy        defaults
+ORANGE="$(c256 202)"  # --orange      deploy
+AMBER="$(c256 214)"   # --amber       approaching limit (>70%)
+GREEN="$(c256 35)"    # --green-active build / active
+RED="$(c256 196)"     # --red-blocked at limit (>90%)
+CYAN="$(c256 45)"     # --cyan-plan   plan / user-agent
+PURPLE="$(c256 129)"  # --purple-cowork cowork / mcp
+GRAY="$(c256 244)"    # --gray-idle   secondary
+MUTE="$(c256 248)"    # --gray-mute   separators, stale
+SEP="${MUTE} │ ${RESET}"
+
+# Threshold color per design system: --navy default, --amber >70%, --red >90%
+pct_color() {
+  local p="${1:-0}"
+  if   [ "$p" -ge 90 ] 2>/dev/null; then printf '%s' "$RED"
+  elif [ "$p" -ge 70 ] 2>/dev/null; then printf '%s' "$AMBER"
+  else                                   printf '%s' "$NAVY"
+  fi
+}
+
+# ── Time helpers ────────────────────────────────────────────────────────
+iso_to_epoch() {  # 2026-06-11T17:53:19Z → epoch (BSD date first, GNU fallback)
+  local ts="${1:-}"
+  [ -z "$ts" ] && { echo 0; return; }
+  TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${ts%Z}" "+%s" 2>/dev/null \
+    || date -d "$ts" "+%s" 2>/dev/null || echo 0
+}
+epoch_fmt() {     # epoch + strftime format → local time string
+  local e="${1:-0}" f="${2:-%H:%M}"
+  [ "$e" -le 0 ] 2>/dev/null && { echo ""; return; }
+  date -r "$e" "+$f" 2>/dev/null || date -d "@$e" "+$f" 2>/dev/null || echo ""
+}
+fmt_age() {       # seconds → "3d 5h" / "2h 14m" / "12m"
+  local s="${1:-0}"
+  if   [ "$s" -ge 86400 ]; then echo "$((s / 86400))d $((s % 86400 / 3600))h"
+  elif [ "$s" -ge 3600 ];  then echo "$((s / 3600))h $((s % 3600 / 60))m"
+  else                          echo "$((s / 60))m"
+  fi
+}
+fmt_tok() {       # 69000 → "69K", 1000000 → "1M"
+  local n="${1:-0}"
+  if [ "$n" -ge 1000000 ] 2>/dev/null; then
+    awk "BEGIN { v = $n / 1000000; if (v == int(v)) printf \"%dM\", v; else printf \"%.1fM\", v }"
+  elif [ "$n" -ge 1000 ] 2>/dev/null; then
+    printf '%dK' "$((n / 1000))"
+  else
+    printf '%s' "$n"
+  fi
+}
+
+# ── Read Claude Code's stdin JSON ───────────────────────────────────────
 INPUT=""
 if [ -t 0 ]; then
   INPUT="{}"
 else
   INPUT=$(cat 2>/dev/null || echo "{}")
 fi
+jq_get() { printf '%s' "$INPUT" | jq -r "${1} // empty" 2>/dev/null || true; }
 
-# Extract from JSON input — Claude Code's exact schema is evolving;
-# we try multiple shapes and fall back to env vars.
-get_field() {
-  local key="$1"
-  local default="${2:-}"
-  local val=""
-  if command -v jq >/dev/null 2>&1; then
-    val=$(echo "$INPUT" | jq -r "$key // empty" 2>/dev/null)
-  fi
-  if [ -z "$val" ]; then
-    val="$default"
-  fi
-  echo "$val"
-}
+HAS_JQ=0
+command -v jq >/dev/null 2>&1 && HAS_JQ=1
+
+# ════════════════════════════════════════════════════════════════════════
+# LINE 1 — where am I
+# ════════════════════════════════════════════════════════════════════════
 
 # ── Model ───────────────────────────────────────────────────────────────
-MODEL=$(get_field '.model.display_name // .model.id // .model' "${CLAUDE_MODEL:-}")
-[ -z "$MODEL" ] && MODEL="—"
-# Strip "claude-" prefix for compactness
-MODEL_LABEL=$(echo "$MODEL" | sed 's/^claude-//; s/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)} 1')
+MODEL=$(jq_get '.model.display_name // .model.id // .model')
+[ -z "$MODEL" ] && MODEL="${CLAUDE_MODEL:-—}"
+MODEL_SEG="🤖 ${MODEL}"
 
 # ── Working dir + project id ────────────────────────────────────────────
-CWD=$(get_field '.cwd' "$PWD")
+CWD=$(jq_get '.cwd')
+[ -z "$CWD" ] && CWD="$PWD"
 FOLDER=$(basename "$CWD")
 PROJECT_ID=$(echo "$FOLDER" | tr '[:upper:]' '[:lower:]')
 
-# ── Git branch ──────────────────────────────────────────────────────────
+# ── Git branch (+ Drive annotation) ─────────────────────────────────────
 BRANCH="—"
 if git -C "$CWD" rev-parse --git-dir >/dev/null 2>&1; then
   BRANCH=$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "—")
-elif echo "$CWD" | grep -q "CloudStorage/GoogleDrive"; then
-  BRANCH="Drive"
 fi
+case "$CWD" in
+  *"CloudStorage/GoogleDrive"*) BRANCH="${BRANCH} ${MUTE}(Drive)${RESET}" ;;
+esac
 
-# ── Phase ───────────────────────────────────────────────────────────────
-PHASE_SEG=""
-if [ -f "${CWD}/.phase.json" ] && command -v jq >/dev/null 2>&1; then
+# ── Phase: 🎯 Build · 6/11 09:00 (3d 5h) · OBS-3 ────────────────────────
+PHASE_SEG="${GRAY}🎯 ?${RESET}"   # per design system: no .phase.json → dimmed 🎯 ?
+if [ -f "${CWD}/.phase.json" ] && [ "$HAS_JQ" -eq 1 ]; then
   PHASE=$(jq -r '.phase // ""' "${CWD}/.phase.json" 2>/dev/null)
   TICKET=$(jq -r '.ticket // ""' "${CWD}/.phase.json" 2>/dev/null)
+  STARTED=$(jq -r '.started_at // ""' "${CWD}/.phase.json" 2>/dev/null)
   case "$PHASE" in
-    plan)         PHASE_EMOJI="💭" ;;
-    cowork)       PHASE_EMOJI="🎼" ;;
-    build)        PHASE_EMOJI="🎯" ;;
-    deploy)       PHASE_EMOJI="🚀" ;;
-    maintenance)  PHASE_EMOJI="🔧" ;;
-    *)            PHASE_EMOJI="" ;;
+    plan)        PHASE_EMOJI="💭" ; PHASE_COL="$CYAN"   ;;
+    cowork)      PHASE_EMOJI="🎼" ; PHASE_COL="$PURPLE" ;;
+    build)       PHASE_EMOJI="🎯" ; PHASE_COL="$GREEN"  ;;
+    deploy)      PHASE_EMOJI="🚀" ; PHASE_COL="$ORANGE" ;;
+    maintenance) PHASE_EMOJI="🔧" ; PHASE_COL="$GRAY"   ;;
+    *)           PHASE_EMOJI=""   ; PHASE_COL=""        ;;
   esac
   if [ -n "$PHASE_EMOJI" ]; then
     # bash-3.2-safe capitalization (macOS stock bash; ${var^} needs bash 4+)
     PHASE_CAP="$(printf '%s' "${PHASE:0:1}" | tr '[:lower:]' '[:upper:]')${PHASE:1}"
-    PHASE_SEG="${PHASE_EMOJI} ${PHASE_CAP}"
-    [ -n "$TICKET" ] && [ "$TICKET" != "null" ] && PHASE_SEG="${PHASE_SEG} · ${TICKET}"
+    PHASE_SEG="${PHASE_COL}${PHASE_EMOJI} ${PHASE_CAP}${RESET}"
+    if [ -n "$STARTED" ] && [ "$STARTED" != "null" ]; then
+      PHASE_EPOCH=$(iso_to_epoch "$STARTED")
+      if [ "$PHASE_EPOCH" -gt 0 ]; then
+        MON=$(epoch_fmt "$PHASE_EPOCH" "%m"); DAY=$(epoch_fmt "$PHASE_EPOCH" "%d")
+        HM=$(epoch_fmt "$PHASE_EPOCH" "%H:%M")
+        PHASE_AGE=$(fmt_age $((NOW - PHASE_EPOCH)))
+        PHASE_SEG="${PHASE_SEG}${MUTE} · ${MON#0}/${DAY#0} ${HM} (${PHASE_AGE})${RESET}"
+      fi
+    fi
+    [ -n "$TICKET" ] && [ "$TICKET" != "null" ] && PHASE_SEG="${PHASE_SEG}${MUTE} · ${RESET}${TICKET}"
   fi
 fi
 
-# ── MNEMOS cache data ───────────────────────────────────────────────────
-MNEMOS_SEG=""
+LINE1_PARTS=("$MODEL_SEG" "📁 ${FOLDER}" "🌿 ${BRANCH}" "$PHASE_SEG")
+
+# ════════════════════════════════════════════════════════════════════════
+# LINE 2 — budget + state
+# ════════════════════════════════════════════════════════════════════════
+LINE2_PARTS=()
+
+# ── Context tokens: 69K/1M 7% ───────────────────────────────────────────
+TOK_USED=$(jq_get '.context_window.total_input_tokens')
+CTX_SIZE=$(jq_get '.context_window.context_window_size')
+if [ -n "$TOK_USED" ] && [ "$TOK_USED" -gt 0 ] 2>/dev/null; then
+  [ -z "$CTX_SIZE" ] && CTX_SIZE=200000
+  CTX_PCT=$(awk "BEGIN { printf \"%.0f\", ($TOK_USED / $CTX_SIZE) * 100 }" 2>/dev/null || echo 0)
+  LINE2_PARTS+=("$(fmt_tok "$TOK_USED")/$(fmt_tok "$CTX_SIZE") $(pct_color "$CTX_PCT")${CTX_PCT}%${RESET}")
+fi
+
+# ── Rate limits: stdin .rate_limits first, then 60s /tmp cache ──────────
+RATE_JSON=""
+FH_PCT=$(jq_get '.rate_limits.five_hour.used_percentage')
+SD_PCT=$(jq_get '.rate_limits.seven_day.used_percentage')
+if [ -n "$FH_PCT" ] || [ -n "$SD_PCT" ]; then
+  RATE_JSON="$INPUT"
+  printf '%s' "$INPUT" | jq '{rate_limits: .rate_limits}' > "$RATE_CACHE" 2>/dev/null || true
+elif [ -f "$RATE_CACHE" ]; then
+  CACHE_MTIME=$(stat -f %m "$RATE_CACHE" 2>/dev/null || stat -c %Y "$RATE_CACHE" 2>/dev/null || echo 0)
+  [ $((NOW - CACHE_MTIME)) -lt 60 ] && RATE_JSON=$(cat "$RATE_CACHE" 2>/dev/null || true)
+fi
+jq_rate() { printf '%s' "$RATE_JSON" | jq -r "${1} // empty" 2>/dev/null || true; }
+
+FH_PCT=$(jq_rate '.rate_limits.five_hour.used_percentage')
+FH_RESET=$(jq_rate '.rate_limits.five_hour.resets_at')
+if [ -n "$FH_PCT" ]; then
+  FH_INT=$(printf '%.0f' "$FH_PCT" 2>/dev/null || echo 0)
+  FH_SEG="${MUTE}5h ${RESET}$(pct_color "$FH_INT")${FH_INT}%${RESET}"
+  FH_AT=$(epoch_fmt "$FH_RESET" "%H:%M")
+  [ -n "$FH_AT" ] && FH_SEG="${FH_SEG}${MUTE}·${FH_AT}${RESET}"
+  LINE2_PARTS+=("$FH_SEG")
+else
+  LINE2_PARTS+=("${GRAY}5h —${RESET}")
+fi
+
+SD_PCT=$(jq_rate '.rate_limits.seven_day.used_percentage')
+SD_RESET=$(jq_rate '.rate_limits.seven_day.resets_at')
+if [ -n "$SD_PCT" ]; then
+  SD_INT=$(printf '%.0f' "$SD_PCT" 2>/dev/null || echo 0)
+  SD_SEG="${MUTE}7d ${RESET}$(pct_color "$SD_INT")${SD_INT}%${RESET}"
+  SD_DAY=$(epoch_fmt "$SD_RESET" "%a %d")
+  if [ -n "$SD_DAY" ]; then
+    SD_DOW="${SD_DAY% *}"; SD_NUM="${SD_DAY#* }"
+    SD_SEG="${SD_SEG}${MUTE}·${SD_DOW} ${SD_NUM#0}${RESET}"
+  fi
+  LINE2_PARTS+=("$SD_SEG")
+else
+  LINE2_PARTS+=("${GRAY}7d —${RESET}")
+fi
+
+# ── MNEMOS cache data: 🧠 4·18K ─────────────────────────────────────────
 CACHE_DIR="${MNEMOS_HOME}/cache/${PROJECT_ID}"
 if [ -d "$CACHE_DIR" ]; then
   SNAPS=0
   [ -d "${CACHE_DIR}/history" ] && SNAPS=$(ls "${CACHE_DIR}/history"/*.json 2>/dev/null | wc -l | tr -d ' ')
-  CTX=0
-  if [ -f "${CACHE_DIR}/latest.json" ] && command -v jq >/dev/null 2>&1; then
-    CTX=$(jq -r '.context_tokens_estimated // 0' "${CACHE_DIR}/latest.json" 2>/dev/null || echo 0)
+  MCTX=0
+  if [ -f "${CACHE_DIR}/latest.json" ] && [ "$HAS_JQ" -eq 1 ]; then
+    MCTX=$(jq -r '.context_tokens_estimated // 0' "${CACHE_DIR}/latest.json" 2>/dev/null || echo 0)
   fi
-  if [ "$SNAPS" -gt 0 ] || [ "$CTX" -gt 0 ]; then
-    MNEMOS_SEG="🧠 ${SNAPS}·$((CTX / 1000))K"
+  if [ "$SNAPS" -gt 0 ] || [ "$MCTX" -gt 0 ] 2>/dev/null; then
+    LINE2_PARTS+=("${GRAY}🧠 ${SNAPS}·$(fmt_tok "$MCTX")${RESET}")
   fi
 fi
 
-# ── Session timer ───────────────────────────────────────────────────────
-SESSION_SEG=""
+# ── Session timer: ⏱ 2h 14m ─────────────────────────────────────────────
 if [ -f "${CACHE_DIR}/session-start.timestamp" ]; then
-  TS=$(stat -f %m "${CACHE_DIR}/session-start.timestamp" 2>/dev/null || echo 0)
-  NOW=$(date "+%s")
+  TS=$(stat -f %m "${CACHE_DIR}/session-start.timestamp" 2>/dev/null \
+       || stat -c %Y "${CACHE_DIR}/session-start.timestamp" 2>/dev/null || echo 0)
   AGE=$((NOW - TS))
-  if [ "$AGE" -lt 3600 ]; then
-    SESSION_SEG="⏱ $((AGE / 60))m"
-  elif [ "$AGE" -lt 86400 ]; then
-    SESSION_SEG="⏱ $((AGE / 3600))h$((AGE % 3600 / 60))m"
-  fi
+  [ "$AGE" -ge 0 ] && [ "$AGE" -lt 86400 ] && LINE2_PARTS+=("${GRAY}⏱ $(fmt_age "$AGE")${RESET}")
 fi
 
-# ── Active agent ────────────────────────────────────────────────────────
-AGENT_SEG=""
-if [ -f "${CACHE_DIR}/active-agent.json" ] && command -v jq >/dev/null 2>&1; then
+# ── Cost: 💰 $0.42 89%c ─────────────────────────────────────────────────
+COST=$(jq_get '.cost.total_cost_usd')
+if [ -n "$COST" ]; then
+  COST_INT=$(printf '%.0f' "$COST" 2>/dev/null || echo 0)
+  COST_COL="$GRAY"   # per design system: --amber >$5, --red >$25
+  [ "$COST_INT" -ge 5 ]  2>/dev/null && COST_COL="$AMBER"
+  [ "$COST_INT" -ge 25 ] 2>/dev/null && COST_COL="$RED"
+  COST_SEG="${COST_COL}💰 $(printf '$%.2f' "$COST" 2>/dev/null || echo "\$${COST}")${RESET}"
+  # Cache-hit % of the last turn, from the transcript's final usage entry
+  TRANSCRIPT=$(jq_get '.transcript_path')
+  if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+    C_READ=$(grep -o '"cache_read_input_tokens":[0-9]*' "$TRANSCRIPT" 2>/dev/null | tail -1 | grep -o '[0-9]*$' || echo "")
+    C_NEW=$(grep -o '"input_tokens":[0-9]*' "$TRANSCRIPT" 2>/dev/null | tail -1 | grep -o '[0-9]*$' || echo "")
+    C_CREATE=$(grep -o '"cache_creation_input_tokens":[0-9]*' "$TRANSCRIPT" 2>/dev/null | tail -1 | grep -o '[0-9]*$' || echo "")
+    if [ -n "$C_READ" ] && [ "$C_READ" -gt 0 ] 2>/dev/null; then
+      C_TOTAL=$(( ${C_NEW:-0} + ${C_CREATE:-0} + C_READ ))
+      [ "$C_TOTAL" -gt 0 ] && COST_SEG="${COST_SEG} ${MUTE}$((C_READ * 100 / C_TOTAL))%c${RESET}"
+    fi
+  fi
+  LINE2_PARTS+=("$COST_SEG")
+fi
+
+# ── Active agent: 🔍 Explore ────────────────────────────────────────────
+if [ -f "${CACHE_DIR}/active-agent.json" ] && [ "$HAS_JQ" -eq 1 ]; then
   AGENT=$(jq -r '.agent // "idle"' "${CACHE_DIR}/active-agent.json" 2>/dev/null)
   AGENT_STARTED=$(jq -r '.started_at // ""' "${CACHE_DIR}/active-agent.json" 2>/dev/null)
   if [ -n "$AGENT_STARTED" ]; then
-    AGENT_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${AGENT_STARTED%Z}" "+%s" 2>/dev/null || \
-                  date -d "$AGENT_STARTED" "+%s" 2>/dev/null || echo 0)
-    NOW=$(date "+%s")
-    AGE=$((NOW - AGENT_EPOCH))
-    [ "$AGE" -gt 300 ] && AGENT="idle"
+    AGENT_EPOCH=$(iso_to_epoch "$AGENT_STARTED")
+    [ "$AGENT_EPOCH" -gt 0 ] && [ $((NOW - AGENT_EPOCH)) -gt 300 ] && AGENT="idle"
   fi
   case "$AGENT" in
-    claude)        AGENT_EMOJI="🤖" ; AGENT_LABEL="Claude" ;;
-    human)         AGENT_EMOJI="👤" ; AGENT_LABEL="human" ;;
-    idle)          AGENT_EMOJI="" ; AGENT_LABEL="" ;;
-    agent:Explore) AGENT_EMOJI="🔍" ; AGENT_LABEL="Explore" ;;
-    agent:Plan)    AGENT_EMOJI="📐" ; AGENT_LABEL="Plan" ;;
-    agent:general-purpose) AGENT_EMOJI="🧰" ; AGENT_LABEL="general" ;;
-    agent:*)       AGENT_EMOJI="🛠" ; AGENT_LABEL="${AGENT#agent:}" ;;
-    user-agent:*)  AGENT_EMOJI="🛠" ; AGENT_LABEL="${AGENT#user-agent:}" ;;
-    mcp:*)         AGENT_EMOJI="🔌" ; AGENT_LABEL="$AGENT" ;;
-    *)             AGENT_EMOJI="" ; AGENT_LABEL="" ;;
+    claude)        AGENT_SEG="${NAVY}🤖 Claude${RESET}" ;;
+    human)         AGENT_SEG="${NAVY}👤 human${RESET}" ;;
+    idle)          AGENT_SEG="${GRAY}💤 idle${RESET}" ;;
+    agent:Explore) AGENT_SEG="${GREEN}🔍 Explore${RESET}" ;;
+    agent:Plan)    AGENT_SEG="${GREEN}📐 Plan${RESET}" ;;
+    agent:general-purpose) AGENT_SEG="${GREEN}🧰 general${RESET}" ;;
+    agent:*)       AGENT_SEG="${GREEN}🛠 ${AGENT#agent:}${RESET}" ;;
+    user-agent:*)  AGENT_SEG="${CYAN}🛠 ${AGENT#user-agent:}${RESET}" ;;
+    mcp:*)         AGENT_SEG="${PURPLE}🔌 ${AGENT}${RESET}" ;;
+    *)             AGENT_SEG="${GRAY}❓ ${AGENT}${RESET}" ;;
   esac
-  [ -n "$AGENT_EMOJI" ] && AGENT_SEG="${AGENT_EMOJI} ${AGENT_LABEL}"
+  LINE2_PARTS+=("$AGENT_SEG")
 fi
 
-# ── Compose statusline ──────────────────────────────────────────────────
-SEGMENTS=()
-[ -n "$MODEL_LABEL" ] && [ "$MODEL_LABEL" != "—" ] && SEGMENTS+=("🤖 ${MODEL_LABEL}")
-SEGMENTS+=("📁 ${FOLDER}")
-SEGMENTS+=("🌿 ${BRANCH}")
-[ -n "$PHASE_SEG" ] && SEGMENTS+=("$PHASE_SEG")
-[ -n "$MNEMOS_SEG" ] && SEGMENTS+=("$MNEMOS_SEG")
-[ -n "$SESSION_SEG" ] && SEGMENTS+=("$SESSION_SEG")
-[ -n "$AGENT_SEG" ] && SEGMENTS+=("$AGENT_SEG")
+# ── Compose (manual join: ${arr[*]} uses first IFS char only, and │ is
+#    multibyte so it can't be an IFS character) ──────────────────────────
+join_parts() {
+  local out="" part
+  for part in "$@"; do
+    if [ -z "$out" ]; then out="$part"; else out="${out}${SEP}${part}"; fi
+  done
+  printf '%s' "$out"
+}
 
-# Join with " │ " (manual loop: ${arr[*]} joins with first IFS char only,
-# and │ is multibyte so it can't be an IFS character)
-LINE=""
-for SEG in "${SEGMENTS[@]}"; do
-  if [ -z "$LINE" ]; then
-    LINE="$SEG"
-  else
-    LINE="${LINE} │ ${SEG}"
-  fi
-done
-echo "$LINE"
+printf '%s\n' "$(join_parts "${LINE1_PARTS[@]}")"
+[ "${#LINE2_PARTS[@]}" -gt 0 ] && printf '%s\n' "$(join_parts "${LINE2_PARTS[@]}")"
+exit 0

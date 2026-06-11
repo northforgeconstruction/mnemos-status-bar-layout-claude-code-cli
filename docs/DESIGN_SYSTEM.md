@@ -185,8 +185,10 @@ These four states apply uniformly across all surfaces and all components.
 #### Component: line-2 (budget + state)
 
 ```
-69K/1M 7% │ 5h 12%·13:10 │ 7d 20%·Mon 15 │ 🧠 4·18K │ ⏱ 2h 14m session │ 💰 $0.42 89%c
+69K/1M 7% │ 5h 12%·13:10 │ 7d 20%·Mon 15 │ 🧠 4·18K │ ⏱ 2h 14m │ 💰 $0.42 89%c │ 🔍 Explore
 ```
+
+The trailing agent segment follows the agent-category colors and only appears when `active-agent.json` exists for the project. `89%c` = cache-hit percentage of the last turn (`c` = cached).
 
 **Color rules:**
 
