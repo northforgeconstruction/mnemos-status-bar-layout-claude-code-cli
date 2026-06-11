@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# mnemos-phase — set/get/transition project phase
+#
+# Writes to <repo>/.phase.json. Honors the schema at
+# schemas/phase.schema.json. Logs a phase_transition event for MNEMOS
+# observability.
+#
+# Usage:
+#   mnemos-phase get                      Show current phase (compact)
+#   mnemos-phase status                   Show current phase + age + history
+#   mnemos-phase set <phase> [--ticket K] Transition to a new phase
+#   mnemos-phase history                  Show all past phases
+#
+# Phases: plan, cowork, build, deploy, maintenance
+
+set -uo pipefail
+
+PHASE_FILE=".phase.json"
+
+# ── Helpers ─────────────────────────────────────────────────────────────
+
+now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+humanize_age() {
+  # Input: ISO 8601 timestamp. Output: "3d 5h" or "5h 12m" or "12m"
+  local started="$1"
+  local started_epoch now_epoch diff_sec days hours mins
+  started_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${started%Z}" "+%s" 2>/dev/null || \
+                  date -d "$started" "+%s" 2>/dev/null || echo 0)
+  now_epoch=$(date "+%s")
+  diff_sec=$((now_epoch - started_epoch))
+  days=$((diff_sec / 86400))
+  hours=$(((diff_sec % 86400) / 3600))
+  mins=$(((diff_sec % 3600) / 60))
+  if [ "$days" -gt 0 ]; then
+    echo "${days}d ${hours}h"
+  elif [ "$hours" -gt 0 ]; then
+    echo "${hours}h ${mins}m"
+  else
+    echo "${mins}m"
+  fi
+}
+
+phase_emoji() {
+  case "$1" in
+    plan)         echo "💭" ;;
+    cowork)       echo "🎼" ;;
+    build)        echo "🎯" ;;
+    deploy)       echo "🚀" ;;
+    maintenance)  echo "🔧" ;;
+    *)            echo "❓" ;;
+  esac
+}
+
+phase_mode() {
+  case "$1" in
+    plan)         echo "Plan Mode" ;;
+    cowork)       echo "Manual" ;;
+    build)        echo "Auto-accept Mode" ;;
+    deploy)       echo "Manual" ;;
+    maintenance)  echo "Manual" ;;
+    *)            echo "?" ;;
+  esac
+}
+
+valid_phase() {
+  case "$1" in
+    plan|cowork|build|deploy|maintenance) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required (brew install jq)" >&2; exit 1; }
+}
+
+# ── Commands ────────────────────────────────────────────────────────────
+
+cmd_get() {
+  require_jq
+  [ -f "$PHASE_FILE" ] || { echo "n/a"; return 0; }
+  local phase
+  phase=$(jq -r '.phase // "n/a"' "$PHASE_FILE")
+  echo "$(phase_emoji "$phase") $phase"
+}
+
+cmd_status() {
+  require_jq
+  if [ ! -f "$PHASE_FILE" ]; then
+    echo "No .phase.json in current directory."
+    echo "Run: mnemos-phase set <phase>"
+    return 0
+  fi
+
+  local phase started ticket age
+  phase=$(jq -r '.phase' "$PHASE_FILE")
+  started=$(jq -r '.started_at' "$PHASE_FILE")
+  ticket=$(jq -r '.ticket // "none"' "$PHASE_FILE")
+  age=$(humanize_age "$started")
+
+  echo "Phase:    $(phase_emoji "$phase") $phase"
+  echo "Since:    $started ($age)"
+  echo "Ticket:   $ticket"
+  echo "Mode:     $(phase_mode "$phase")  ← recommended Claude Code mode"
+  echo ""
+  local history_count
+  history_count=$(jq '.previous | length' "$PHASE_FILE")
+  echo "Previous phases: $history_count"
+}
+
+cmd_history() {
+  require_jq
+  [ -f "$PHASE_FILE" ] || { echo "No .phase.json."; return 0; }
+
+  echo "Phase history:"
+  jq -r '.previous[] |
+    "\(.started_at) → \(.ended_at)  \(.phase)  (ticket: \(.ticket // "none"))"' \
+    "$PHASE_FILE"
+
+  local cur cur_started
+  cur=$(jq -r '.phase' "$PHASE_FILE")
+  cur_started=$(jq -r '.started_at' "$PHASE_FILE")
+  echo "$cur_started → (now)  $cur  ← current"
+}
+
+cmd_set() {
+  require_jq
+  local new_phase="$1"
+  shift
+  local ticket=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --ticket) ticket="$2"; shift 2 ;;
+      *) echo "Unknown arg: $1" >&2; return 1 ;;
+    esac
+  done
+
+  if ! valid_phase "$new_phase"; then
+    echo "ERROR: invalid phase '$new_phase'" >&2
+    echo "Valid: plan, cowork, build, deploy, maintenance" >&2
+    return 1
+  fi
+
+  local now
+  now=$(now_iso)
+
+  if [ -f "$PHASE_FILE" ]; then
+    # Archive current phase to previous, write new current
+    local cur_phase cur_started cur_ticket
+    cur_phase=$(jq -r '.phase' "$PHASE_FILE")
+    cur_started=$(jq -r '.started_at' "$PHASE_FILE")
+    cur_ticket=$(jq -r '.ticket' "$PHASE_FILE")
+
+    if [ "$cur_phase" = "$new_phase" ]; then
+      echo "Already in phase '$new_phase'. No change."
+      return 0
+    fi
+
+    jq --arg new_phase "$new_phase" \
+       --arg now "$now" \
+       --arg ticket "$ticket" \
+       --arg cur_phase "$cur_phase" \
+       --arg cur_started "$cur_started" \
+       --arg cur_ticket "$cur_ticket" \
+       '{
+          schema_version: "1.0",
+          phase: $new_phase,
+          started_at: $now,
+          ticket: (if $ticket == "" then null else $ticket end),
+          previous: ((.previous // []) + [{
+            phase: $cur_phase,
+            started_at: $cur_started,
+            ended_at: $now,
+            ticket: (if $cur_ticket == "null" then null else $cur_ticket end)
+          }]),
+          notes: ""
+        }' "$PHASE_FILE" > "${PHASE_FILE}.tmp" && mv "${PHASE_FILE}.tmp" "$PHASE_FILE"
+
+    echo "Transitioned: $(phase_emoji "$cur_phase") $cur_phase → $(phase_emoji "$new_phase") $new_phase"
+  else
+    # First-time write
+    jq -n --arg phase "$new_phase" \
+          --arg now "$now" \
+          --arg ticket "$ticket" \
+          '{
+            schema_version: "1.0",
+            phase: $phase,
+            started_at: $now,
+            ticket: (if $ticket == "" then null else $ticket end),
+            previous: [],
+            notes: ""
+          }' > "$PHASE_FILE"
+
+    echo "Initialized: $(phase_emoji "$new_phase") $new_phase"
+  fi
+
+  echo "Recommended Claude Code mode: $(phase_mode "$new_phase")"
+
+  # Log to MNEMOS observability (if hook lib exists)
+  local mnemos_log="${MNEMOS_HOME:-${HOME}/.mnemos}/hooks/lib/log-event.sh"
+  if [ -f "$mnemos_log" ]; then
+    # shellcheck source=/dev/null
+    . "$mnemos_log"
+    MNEMOS_CWD="$PWD" log_event "phase_transition" \
+      "phase=${new_phase}" \
+      "ticket=${ticket:-none}"
+  fi
+}
+
+# ── Dispatch ────────────────────────────────────────────────────────────
+
+CMD="${1:-status}"
+shift 2>/dev/null || true
+
+case "$CMD" in
+  get)     cmd_get ;;
+  status)  cmd_status ;;
+  history) cmd_history ;;
+  set)
+    [ $# -ge 1 ] || { echo "Usage: mnemos-phase set <phase> [--ticket K]" >&2; exit 1; }
+    cmd_set "$@"
+    ;;
+  -h|--help|help)
+    sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
+    ;;
+  *)
+    echo "Unknown command: $CMD" >&2
+    echo "Usage: mnemos-phase {get|status|history|set <phase> [--ticket K]}" >&2
+    exit 1
+    ;;
+esac

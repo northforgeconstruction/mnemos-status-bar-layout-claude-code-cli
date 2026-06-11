@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# mnemos-session-setup — bootstrap a project for MNEMOS phase tracking.
+#
+# Run once per project (the "session setup" — analogous to git init for phase
+# tracking). Initializes .phase.json, optionally adds the mode-by-phase snippet
+# to CLAUDE.md, and prints next steps.
+#
+# Usage:
+#   cd /path/to/your/project
+#   mnemos-session-setup [--phase plan|cowork|build|deploy|maintenance]
+#                        [--ticket KEY]
+#                        [--no-claude-md]
+#
+# Idempotent — re-runnable. If .phase.json exists, shows current state.
+
+set -uo pipefail
+
+# ── Colors ──────────────────────────────────────────────────────────────
+COLOR_NAVY='\033[38;5;24m'
+COLOR_GREEN='\033[38;5;35m'
+COLOR_AMBER='\033[38;5;214m'
+COLOR_GRAY='\033[38;5;244m'
+COLOR_RESET='\033[0m'
+
+ok()   { printf "${COLOR_GREEN}✓${COLOR_RESET} %s\n" "$*"; }
+warn() { printf "${COLOR_AMBER}⚠${COLOR_RESET}  %s\n" "$*"; }
+info() { printf "${COLOR_GRAY}•${COLOR_RESET} %s\n" "$*"; }
+head() { printf "\n${COLOR_NAVY}━━ %s ━━${COLOR_RESET}\n" "$*"; }
+
+# ── Parse args ──────────────────────────────────────────────────────────
+PHASE="plan"   # default: every project starts in plan
+TICKET=""
+SKIP_CLAUDE_MD=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --phase) PHASE="$2"; shift 2 ;;
+    --ticket) TICKET="$2"; shift 2 ;;
+    --no-claude-md) SKIP_CLAUDE_MD=1; shift ;;
+    -h|--help)
+      sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+PROJECT="$(basename "$PWD")"
+
+head "Setting up MNEMOS phase tracking for: $PROJECT"
+
+# ── Step 1: .phase.json ─────────────────────────────────────────────────
+if [ -f ".phase.json" ]; then
+  ok ".phase.json already exists"
+  info "Current state:"
+  mnemos-phase status 2>/dev/null || cat .phase.json
+else
+  if ! command -v mnemos-phase >/dev/null 2>&1; then
+    warn "mnemos-phase not on PATH — install.sh first"
+    exit 1
+  fi
+
+  if [ -n "$TICKET" ]; then
+    mnemos-phase set "$PHASE" --ticket "$TICKET"
+  else
+    mnemos-phase set "$PHASE"
+  fi
+  ok "Initialized .phase.json (phase: $PHASE)"
+fi
+
+# ── Step 2: CLAUDE.md mode-by-phase snippet ─────────────────────────────
+if [ "$SKIP_CLAUDE_MD" -eq 0 ]; then
+  if [ -f "CLAUDE.md" ]; then
+    if grep -q "Mode by phase" CLAUDE.md 2>/dev/null; then
+      ok "CLAUDE.md already has Mode by phase section"
+    else
+      warn "CLAUDE.md exists but is missing the Mode by phase section"
+      info "Append the snippet from:"
+      info "  github.com/northforgeconstruction/mnemos-status-bar-layout/blob/main/docs/MODE_BY_PHASE.md"
+      info "(Or re-run with --no-claude-md to skip this nudge)"
+    fi
+  else
+    info "No CLAUDE.md in this project"
+    info "Recommended: create one with at least these sections:"
+    info "  - What this repo is"
+    info "  - Where context lives"
+    info "  - Mode by phase (drop-in from docs/MODE_BY_PHASE.md)"
+  fi
+fi
+
+# ── Step 3: .gitignore — never .phase.json ─────────────────────────────
+if [ -d ".git" ] && [ -f ".gitignore" ]; then
+  if grep -q "^\.phase\.json$" .gitignore 2>/dev/null; then
+    warn ".phase.json is gitignored — but it's project state, not user secret"
+    info "Consider removing the ignore: edit .gitignore"
+  fi
+fi
+
+# ── Step 4: Suggest current Claude Code mode ────────────────────────────
+head "Recommended Claude Code mode for this phase"
+
+case "$PHASE" in
+  plan)
+    info "💭 Plan phase → Plan Mode (Shift+Tab once from default)"
+    info "Designing, not executing. No code edits, no commits."
+    ;;
+  cowork)
+    info "🎼 Cowork phase → Manual mode (default)"
+    info "Cross-system orchestration; deliberate confirmation per action."
+    ;;
+  build)
+    info "🎯 Build phase → Auto-accept mode (Shift+Tab twice from default)"
+    info "Heads-down coding; trust the agent to execute."
+    ;;
+  deploy)
+    info "🚀 Deploy phase → Manual mode"
+    info "Production touches; explicit confirmation per step."
+    ;;
+  maintenance)
+    info "🔧 Maintenance phase → Manual mode"
+    info "Production care; explicit confirmation per step."
+    ;;
+esac
+
+# ── Summary ─────────────────────────────────────────────────────────────
+head "Setup complete"
+
+ok "Project '$PROJECT' is phase-tracked"
+ok "Current phase: $PHASE${TICKET:+ · ticket: $TICKET}"
+info ""
+info "Useful commands:"
+info "  mnemos-phase status       — show current phase + age + ticket"
+info "  mnemos-phase set <phase>  — transition to a new phase"
+info "  mnemos-phase history      — show all past phases"
+info ""
+info "Surfaces consuming this state:"
+info "  - Terminal statusline (when hostfin-statusline.sh is patched)"
+info "  - SwiftBar menu bar plugin (if SwiftBar installed)"
+info "  - Obsidian vault 00-PORTFOLIO.md (when right-now-panel.md pasted)"

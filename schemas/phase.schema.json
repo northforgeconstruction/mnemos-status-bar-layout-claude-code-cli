@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/northforgeconstruction/mnemos-status-bar-layout/schemas/phase.schema.json",
+  "title": "MNEMOS Project Phase",
+  "description": "Current phase + history for a project. Lives at <project>/.phase.json. Read by statusline, SwiftBar plugin, and Obsidian vault panel.",
+  "type": "object",
+  "required": ["phase", "started_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "phase": {
+      "type": "string",
+      "enum": ["plan", "cowork", "build", "deploy", "maintenance"],
+      "description": "Current operating phase for this project."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the current phase began. Used to compute 'how long have we been in this phase.'"
+    },
+    "ticket": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Z][A-Z0-9_]+-[0-9]+$",
+      "description": "Active Jira ticket for the current phase. Format: PROJ-123. Null if no specific ticket."
+    },
+    "previous": {
+      "type": "array",
+      "description": "History of prior phases for this project. Append on each transition.",
+      "items": {
+        "type": "object",
+        "required": ["phase", "started_at", "ended_at"],
+        "additionalProperties": false,
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": ["plan", "cowork", "build", "deploy", "maintenance"]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ticket": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "string",
+      "description": "Optional free-text notes about the current phase. Surfaced in vault panel only, not statusline."
+    }
+  }
+}
