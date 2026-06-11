@@ -1,8 +1,15 @@
 {
   "schema_version": "1.0",
-  "phase": "build",
-  "started_at": "2026-06-11T17:53:19Z",
+  "phase": "deploy",
+  "started_at": "2026-06-11T21:15:53Z",
   "ticket": "MNEM-75",
-  "previous": [],
+  "previous": [
+    {
+      "phase": "build",
+      "started_at": "2026-06-11T17:53:19Z",
+      "ended_at": "2026-06-11T21:15:53Z",
+      "ticket": "MNEM-75"
+    }
+  ],
   "notes": ""
 }

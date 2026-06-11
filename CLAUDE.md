@@ -33,7 +33,7 @@ This repo is the **Claude Code CLI** variant. Future harnesses (Claude Desktop, 
 
 ## Current focus
 
-`.phase.json` for this repo will start at `plan` until the first surface ships. Acceptance for moving to `build`: schema locked, `mnemos-phase` CLI working, statusline+swiftbar render real data from a fake `.phase.json`.
+Phase: 🚀 **deploy** (MNEM-75). All three surfaces shipped: statusline (two-line, wired via /statusline), SwiftBar v0.2 (multi-project), vault panel (00-PORTFOLIO.md). Repo enrolled in MNEMOS (snapshot-before-compaction live). Next: observe real usage, then → maintenance.
 
 ## Mode by phase (auto-enforce)
 
