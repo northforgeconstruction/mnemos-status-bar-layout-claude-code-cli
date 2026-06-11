@@ -1,122 +1,183 @@
 #!/usr/bin/env bash
 # <bitbar.title>MNEMOS</bitbar.title>
-# <bitbar.version>v0.1.0</bitbar.version>
+# <bitbar.version>v0.2.0</bitbar.version>
 # <bitbar.author>Phyrom Oum</bitbar.author>
 # <bitbar.author.github>northforgeconstruction</bitbar.author.github>
-# <bitbar.desc>Shows MNEMOS state: current project phase, snapshot count, context tokens, session age, Jira open tickets.</bitbar.desc>
+# <bitbar.desc>Shows MNEMOS state across ALL active projects: per-project phase, agent, snapshot count, context tokens, Jira open tickets.</bitbar.desc>
 # <bitbar.dependencies>bash,jq</bitbar.dependencies>
 #
 # Install: drop into ~/.config/swiftbar/plugins/ and chmod +x.
-# Reads from: ~/.mnemos/cache/<project>/ for whichever project most recently fired SessionStart.
-#
+# Reads from: ~/.mnemos/cache/*/ for ALL MNEMOS-enrolled projects.
 # Refreshes every 5 minutes (filename convention .5m.sh).
+#
+# v0.2: shows all projects in dropdown, summary stats in menu bar.
 
 set -uo pipefail
 
 MNEMOS_HOME="${MNEMOS_HOME:-${HOME}/.mnemos}"
+STALE_THRESHOLD_SEC=300  # 5 min — agents considered idle after this
 
-# Find the most-recently-active project
-LAST_PROJECT=""
-LAST_AGE=999999
+# ── Helpers ─────────────────────────────────────────────────────────────
+now_epoch() { date "+%s"; }
+
+agent_emoji() {
+  case "$1" in
+    claude)            echo "🤖" ;;
+    human)             echo "👤" ;;
+    idle|"")           echo "💤" ;;
+    mnemos-daemon)     echo "🧠" ;;
+    agent:Explore)     echo "🔍" ;;
+    agent:Plan)        echo "📐" ;;
+    agent:general-purpose) echo "🧰" ;;
+    agent:*)           echo "🛠" ;;
+    user-agent:*)      echo "🛠" ;;
+    mcp:*)             echo "🔌" ;;
+    *)                 echo "❓" ;;
+  esac
+}
+
+phase_emoji() {
+  case "$1" in
+    plan)         echo "💭" ;;
+    cowork)       echo "🎼" ;;
+    build)        echo "🎯" ;;
+    deploy)       echo "🚀" ;;
+    maintenance)  echo "🔧" ;;
+    *)            echo "" ;;
+  esac
+}
+
+agent_label() {
+  case "$1" in
+    agent:*)      echo "${1#agent:}" ;;
+    user-agent:*) echo "${1#user-agent:}" ;;
+    *)            echo "$1" ;;
+  esac
+}
+
+# ── Gather all projects ─────────────────────────────────────────────────
+TOTAL_PROJECTS=0
+ACTIVE_PROJECTS=0
+TOTAL_SNAPS=0
+TOTAL_CTX_TOKENS=0
+TOTAL_JIRA_OPEN=0
+
+declare -a PROJECT_LINES=()
+
 if [ -d "${MNEMOS_HOME}/cache" ]; then
+  NOW=$(now_epoch)
   for project_dir in "${MNEMOS_HOME}/cache"/*/; do
     [ -d "$project_dir" ] || continue
-    local_ts_file="${project_dir}session-start.timestamp"
-    [ -f "$local_ts_file" ] || continue
-    ts_mtime=$(stat -f %m "$local_ts_file" 2>/dev/null || echo 0)
-    now=$(date +%s)
-    age=$(( now - ts_mtime ))
-    if [ "$age" -lt "$LAST_AGE" ]; then
-      LAST_AGE=$age
-      LAST_PROJECT=$(basename "$project_dir")
+    PROJECT_ID=$(basename "$project_dir")
+    TOTAL_PROJECTS=$((TOTAL_PROJECTS + 1))
+
+    # Last session
+    LAST_ACTIVE="—"
+    LAST_AGE_SEC=999999
+    if [ -f "${project_dir}session-start.timestamp" ]; then
+      TS_MTIME=$(stat -f %m "${project_dir}session-start.timestamp" 2>/dev/null || echo 0)
+      LAST_AGE_SEC=$((NOW - TS_MTIME))
+      if [ "$LAST_AGE_SEC" -lt 86400 ]; then
+        LAST_ACTIVE=$(date -r "$TS_MTIME" "+%H:%M" 2>/dev/null)
+      else
+        LAST_ACTIVE=$(date -r "$TS_MTIME" "+%m-%d" 2>/dev/null)
+      fi
     fi
+
+    # Snapshot count
+    SNAPS=0
+    [ -d "${project_dir}history" ] && SNAPS=$(ls "${project_dir}history"/*.json 2>/dev/null | wc -l | tr -d ' ')
+    TOTAL_SNAPS=$((TOTAL_SNAPS + SNAPS))
+
+    # Context tokens
+    CTX=0
+    if [ -f "${project_dir}latest.json" ] && command -v jq >/dev/null 2>&1; then
+      CTX=$(jq -r '.context_tokens_estimated // 0' "${project_dir}latest.json" 2>/dev/null || echo 0)
+    fi
+    TOTAL_CTX_TOKENS=$((TOTAL_CTX_TOKENS + CTX))
+
+    # Jira open
+    JIRA=0
+    if [ -f "${project_dir}jira-open-tickets.json" ] && command -v jq >/dev/null 2>&1; then
+      JIRA=$(jq -r '.tickets | length' "${project_dir}jira-open-tickets.json" 2>/dev/null || echo 0)
+    fi
+    TOTAL_JIRA_OPEN=$((TOTAL_JIRA_OPEN + JIRA))
+
+    # Phase (from .phase.json — mirror copy at ~/.mnemos/cache/<project>/phase-mirror.json)
+    PHASE="—"
+    PHASE_EMOJI_VAL=""
+    TICKET="—"
+    if [ -f "${project_dir}phase-mirror.json" ] && command -v jq >/dev/null 2>&1; then
+      PHASE=$(jq -r '.phase // "—"' "${project_dir}phase-mirror.json" 2>/dev/null)
+      TICKET=$(jq -r '.ticket // "—"' "${project_dir}phase-mirror.json" 2>/dev/null)
+      PHASE_EMOJI_VAL=$(phase_emoji "$PHASE")
+    fi
+
+    # Active agent
+    AGENT="idle"
+    AGENT_AGE_SEC=999999
+    if [ -f "${project_dir}active-agent.json" ] && command -v jq >/dev/null 2>&1; then
+      AGENT_RAW=$(jq -r '.agent // "idle"' "${project_dir}active-agent.json" 2>/dev/null)
+      AGENT_STARTED=$(jq -r '.started_at // ""' "${project_dir}active-agent.json" 2>/dev/null)
+      if [ -n "$AGENT_STARTED" ]; then
+        AGENT_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${AGENT_STARTED%Z}" "+%s" 2>/dev/null || \
+                      date -d "$AGENT_STARTED" "+%s" 2>/dev/null || echo 0)
+        AGENT_AGE_SEC=$((NOW - AGENT_EPOCH))
+      fi
+      if [ "$AGENT_AGE_SEC" -lt "$STALE_THRESHOLD_SEC" ]; then
+        AGENT="$AGENT_RAW"
+      fi
+    fi
+    AGENT_EMOJI_VAL=$(agent_emoji "$AGENT")
+    AGENT_LABEL_VAL=$(agent_label "$AGENT")
+
+    # Active if last session within 24h
+    if [ "$LAST_AGE_SEC" -lt 86400 ]; then
+      ACTIVE_PROJECTS=$((ACTIVE_PROJECTS + 1))
+    fi
+
+    # Build per-project dropdown line
+    PHASE_DISPLAY=""
+    [ -n "$PHASE_EMOJI_VAL" ] && PHASE_DISPLAY=" · ${PHASE_EMOJI_VAL} ${PHASE}"
+    [ "$TICKET" != "—" ] && [ -n "$TICKET" ] && [ "$TICKET" != "null" ] && PHASE_DISPLAY="${PHASE_DISPLAY} · ${TICKET}"
+
+    PROJECT_LINES+=("${PROJECT_ID}${PHASE_DISPLAY} · ${AGENT_EMOJI_VAL} ${AGENT_LABEL_VAL} · ${SNAPS} snaps · $((CTX / 1000))K ctx · 🎫${JIRA} · last ${LAST_ACTIVE} | href=file://${project_dir}")
   done
 fi
 
-if [ -z "$LAST_PROJECT" ]; then
+# ── Menu bar (top line) ─────────────────────────────────────────────────
+if [ "$TOTAL_PROJECTS" -eq 0 ]; then
   echo "🧠 idle"
   echo "---"
-  echo "No active MNEMOS project"
+  echo "No active MNEMOS projects"
   echo "Cache dir: ${MNEMOS_HOME}/cache | refresh=true"
   exit 0
 fi
 
-CACHE_DIR="${MNEMOS_HOME}/cache/${LAST_PROJECT}"
-
-# Read snapshot count
-SNAP_COUNT=0
-if [ -d "${CACHE_DIR}/history" ]; then
-  SNAP_COUNT=$(ls "${CACHE_DIR}/history"/*.json 2>/dev/null | wc -l | tr -d ' ')
+MENU_BAR="🧠 ${ACTIVE_PROJECTS}/${TOTAL_PROJECTS}"
+if [ "$TOTAL_SNAPS" -gt 0 ]; then
+  MENU_BAR="${MENU_BAR} · ${TOTAL_SNAPS}snaps"
 fi
-
-# Read latest snapshot for context tokens
-CONTEXT_TOKENS=0
-if [ -f "${CACHE_DIR}/latest.json" ] && command -v jq >/dev/null 2>&1; then
-  CONTEXT_TOKENS=$(jq -r '.context_tokens_estimated // 0' "${CACHE_DIR}/latest.json")
+if [ "$TOTAL_CTX_TOKENS" -gt 0 ]; then
+  MENU_BAR="${MENU_BAR} · $((TOTAL_CTX_TOKENS / 1000))K"
 fi
-
-# Read Jira open tickets
-JIRA_OPEN=0
-if [ -f "${CACHE_DIR}/jira-open-tickets.json" ] && command -v jq >/dev/null 2>&1; then
-  JIRA_OPEN=$(jq -r '.tickets | length' "${CACHE_DIR}/jira-open-tickets.json" 2>/dev/null || echo 0)
-fi
-
-# Read active agent
-ACTIVE_AGENT="idle"
-AGENT_EMOJI="💤"
-AGENT_LABEL="idle"
-AGENT_CATEGORY="idle"
-AGENT_AGE_SEC=999999
-if [ -f "${CACHE_DIR}/active-agent.json" ] && command -v jq >/dev/null 2>&1; then
-  ACTIVE_AGENT=$(jq -r '.agent // "idle"' "${CACHE_DIR}/active-agent.json")
-  AGENT_CATEGORY=$(jq -r '.category // "idle"' "${CACHE_DIR}/active-agent.json")
-  AGENT_STARTED=$(jq -r '.started_at // ""' "${CACHE_DIR}/active-agent.json")
-  if [ -n "$AGENT_STARTED" ]; then
-    AGENT_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${AGENT_STARTED%Z}" "+%s" 2>/dev/null || \
-                  date -d "$AGENT_STARTED" "+%s" 2>/dev/null || echo 0)
-    NOW_EPOCH=$(date "+%s")
-    AGENT_AGE_SEC=$((NOW_EPOCH - AGENT_EPOCH))
-  fi
-  # If stale (>5 min), mark as idle visually
-  if [ "$AGENT_AGE_SEC" -gt 300 ]; then
-    ACTIVE_AGENT="idle"
-    AGENT_CATEGORY="idle"
-  fi
-  case "$ACTIVE_AGENT" in
-    claude)            AGENT_EMOJI="🤖"; AGENT_LABEL="Claude" ;;
-    human)             AGENT_EMOJI="👤"; AGENT_LABEL="human" ;;
-    idle)              AGENT_EMOJI="💤"; AGENT_LABEL="idle" ;;
-    mnemos-daemon)     AGENT_EMOJI="🧠"; AGENT_LABEL="daemon" ;;
-    agent:Explore)     AGENT_EMOJI="🔍"; AGENT_LABEL="Explore" ;;
-    agent:Plan)        AGENT_EMOJI="📐"; AGENT_LABEL="Plan" ;;
-    agent:general-purpose) AGENT_EMOJI="🧰"; AGENT_LABEL="general-purpose" ;;
-    agent:*)           AGENT_EMOJI="🛠"; AGENT_LABEL="${ACTIVE_AGENT#agent:}" ;;
-    user-agent:*)      AGENT_EMOJI="🛠"; AGENT_LABEL="${ACTIVE_AGENT#user-agent:}" ;;
-    mcp:*)             AGENT_EMOJI="🔌"; AGENT_LABEL="$ACTIVE_AGENT" ;;
-    *)                 AGENT_EMOJI="❓"; AGENT_LABEL="$ACTIVE_AGENT" ;;
-  esac
-fi
-
-# Format menu bar (top line)
-MENU_BAR="🧠 ${LAST_PROJECT} · ${AGENT_EMOJI}${AGENT_LABEL}"
-if [ "$CONTEXT_TOKENS" -gt 0 ]; then
-  TOKENS_K=$((CONTEXT_TOKENS / 1000))
-  MENU_BAR="${MENU_BAR} · ${TOKENS_K}K ctx"
+if [ "$TOTAL_JIRA_OPEN" -gt 0 ]; then
+  MENU_BAR="${MENU_BAR} · 🎫${TOTAL_JIRA_OPEN}"
 fi
 
 echo "$MENU_BAR"
 
-# Dropdown details
+# ── Dropdown ────────────────────────────────────────────────────────────
 echo "---"
-echo "Active project: ${LAST_PROJECT} | href=file://${CACHE_DIR}"
-echo "Active agent: ${AGENT_EMOJI} ${AGENT_LABEL} (${AGENT_CATEGORY})"
-echo "Last session: $(date -r $(stat -f %m "${CACHE_DIR}/session-start.timestamp" 2>/dev/null) "+%Y-%m-%d %H:%M") | refresh=true"
-echo "Snapshots: ${SNAP_COUNT}"
-echo "Latest payload: ${CONTEXT_TOKENS} tokens"
-echo "Jira open: ${JIRA_OPEN}"
+echo "MNEMOS — ${ACTIVE_PROJECTS} of ${TOTAL_PROJECTS} active in last 24h"
 echo "---"
-echo "Open cache dir | href=file://${CACHE_DIR}"
+
+# Per-project lines (sorted alphabetically by project name)
+printf '%s\n' "${PROJECT_LINES[@]}" | sort
+
+echo "---"
+echo "Open cache dir | href=file://${MNEMOS_HOME}/cache/"
 echo "Open Obsidian Operator vault | href=obsidian://open?vault=obsidian-operator"
-echo "Open Jira project | href=https://bldsync.atlassian.net/jira/projects"
+echo "Open Jira | href=https://bldsync.atlassian.net/jira/projects"
 echo "---"
 echo "Refresh | refresh=true"

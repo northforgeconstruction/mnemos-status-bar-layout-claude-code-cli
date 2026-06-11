@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# mnemos-statusline-render — renders the MNEMOS-aware statusline for
+# Claude Code CLI. Point Claude Code's /statusline at this script.
+#
+# Output format (single line, pipe-separated segments):
+#   🤖 <model> │ 📁 <folder> │ 🌿 <branch> │ <phase> │ 🧠 <snaps>·<ctx> │ ⏱ <session> │ <agent>
+#
+# Works in ANY directory — not just MNEMOS-enrolled ones. Degrades gracefully:
+# fields with no data show "—" or are omitted.
+#
+# Configuration in Claude Code:
+#   /statusline → choose "Custom command" → paste this path:
+#     ~/.local/bin/mnemos-statusline-render
+#
+# Reads (when available):
+#   - $PWD/.phase.json — current phase + ticket + start timestamp
+#   - ~/.mnemos/cache/<project>/latest.json — snapshot + tokens
+#   - ~/.mnemos/cache/<project>/history/ — snapshot count
+#   - ~/.mnemos/cache/<project>/session-start.timestamp — session age
+#   - ~/.mnemos/cache/<project>/active-agent.json — active agent
+
+set -uo pipefail
+
+MNEMOS_HOME="${MNEMOS_HOME:-${HOME}/.mnemos}"
+
+# Read Claude Code's input (statusline scripts receive JSON via stdin)
+INPUT=""
+if [ -t 0 ]; then
+  INPUT="{}"
+else
+  INPUT=$(cat 2>/dev/null || echo "{}")
+fi
+
+# Extract from JSON input — Claude Code's exact schema is evolving;
+# we try multiple shapes and fall back to env vars.
+get_field() {
+  local key="$1"
+  local default="${2:-}"
+  local val=""
+  if command -v jq >/dev/null 2>&1; then
+    val=$(echo "$INPUT" | jq -r "$key // empty" 2>/dev/null)
+  fi
+  if [ -z "$val" ]; then
+    val="$default"
+  fi
+  echo "$val"
+}
+
+# ── Model ───────────────────────────────────────────────────────────────
+MODEL=$(get_field '.model.display_name // .model.id // .model' "${CLAUDE_MODEL:-}")
+[ -z "$MODEL" ] && MODEL="—"
+# Strip "claude-" prefix for compactness
+MODEL_LABEL=$(echo "$MODEL" | sed 's/^claude-//; s/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)} 1')
+
+# ── Working dir + project id ────────────────────────────────────────────
+CWD=$(get_field '.cwd' "$PWD")
+FOLDER=$(basename "$CWD")
+PROJECT_ID=$(echo "$FOLDER" | tr '[:upper:]' '[:lower:]')
+
+# ── Git branch ──────────────────────────────────────────────────────────
+BRANCH="—"
+if git -C "$CWD" rev-parse --git-dir >/dev/null 2>&1; then
+  BRANCH=$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "—")
+elif echo "$CWD" | grep -q "CloudStorage/GoogleDrive"; then
+  BRANCH="Drive"
+fi
+
+# ── Phase ───────────────────────────────────────────────────────────────
+PHASE_SEG=""
+if [ -f "${CWD}/.phase.json" ] && command -v jq >/dev/null 2>&1; then
+  PHASE=$(jq -r '.phase // ""' "${CWD}/.phase.json" 2>/dev/null)
+  TICKET=$(jq -r '.ticket // ""' "${CWD}/.phase.json" 2>/dev/null)
+  case "$PHASE" in
+    plan)         PHASE_EMOJI="💭" ;;
+    cowork)       PHASE_EMOJI="🎼" ;;
+    build)        PHASE_EMOJI="🎯" ;;
+    deploy)       PHASE_EMOJI="🚀" ;;
+    maintenance)  PHASE_EMOJI="🔧" ;;
+    *)            PHASE_EMOJI="" ;;
+  esac
+  if [ -n "$PHASE_EMOJI" ]; then
+    PHASE_SEG="${PHASE_EMOJI} ${PHASE^}"
+    [ -n "$TICKET" ] && [ "$TICKET" != "null" ] && PHASE_SEG="${PHASE_SEG} · ${TICKET}"
+  fi
+fi
+
+# ── MNEMOS cache data ───────────────────────────────────────────────────
+MNEMOS_SEG=""
+CACHE_DIR="${MNEMOS_HOME}/cache/${PROJECT_ID}"
+if [ -d "$CACHE_DIR" ]; then
+  SNAPS=0
+  [ -d "${CACHE_DIR}/history" ] && SNAPS=$(ls "${CACHE_DIR}/history"/*.json 2>/dev/null | wc -l | tr -d ' ')
+  CTX=0
+  if [ -f "${CACHE_DIR}/latest.json" ] && command -v jq >/dev/null 2>&1; then
+    CTX=$(jq -r '.context_tokens_estimated // 0' "${CACHE_DIR}/latest.json" 2>/dev/null || echo 0)
+  fi
+  if [ "$SNAPS" -gt 0 ] || [ "$CTX" -gt 0 ]; then
+    MNEMOS_SEG="🧠 ${SNAPS}·$((CTX / 1000))K"
+  fi
+fi
+
+# ── Session timer ───────────────────────────────────────────────────────
+SESSION_SEG=""
+if [ -f "${CACHE_DIR}/session-start.timestamp" ]; then
+  TS=$(stat -f %m "${CACHE_DIR}/session-start.timestamp" 2>/dev/null || echo 0)
+  NOW=$(date "+%s")
+  AGE=$((NOW - TS))
+  if [ "$AGE" -lt 3600 ]; then
+    SESSION_SEG="⏱ $((AGE / 60))m"
+  elif [ "$AGE" -lt 86400 ]; then
+    SESSION_SEG="⏱ $((AGE / 3600))h$((AGE % 3600 / 60))m"
+  fi
+fi
+
+# ── Active agent ────────────────────────────────────────────────────────
+AGENT_SEG=""
+if [ -f "${CACHE_DIR}/active-agent.json" ] && command -v jq >/dev/null 2>&1; then
+  AGENT=$(jq -r '.agent // "idle"' "${CACHE_DIR}/active-agent.json" 2>/dev/null)
+  AGENT_STARTED=$(jq -r '.started_at // ""' "${CACHE_DIR}/active-agent.json" 2>/dev/null)
+  if [ -n "$AGENT_STARTED" ]; then
+    AGENT_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${AGENT_STARTED%Z}" "+%s" 2>/dev/null || \
+                  date -d "$AGENT_STARTED" "+%s" 2>/dev/null || echo 0)
+    NOW=$(date "+%s")
+    AGE=$((NOW - AGENT_EPOCH))
+    [ "$AGE" -gt 300 ] && AGENT="idle"
+  fi
+  case "$AGENT" in
+    claude)        AGENT_EMOJI="🤖" ; AGENT_LABEL="Claude" ;;
+    human)         AGENT_EMOJI="👤" ; AGENT_LABEL="human" ;;
+    idle)          AGENT_EMOJI="" ; AGENT_LABEL="" ;;
+    agent:Explore) AGENT_EMOJI="🔍" ; AGENT_LABEL="Explore" ;;
+    agent:Plan)    AGENT_EMOJI="📐" ; AGENT_LABEL="Plan" ;;
+    agent:general-purpose) AGENT_EMOJI="🧰" ; AGENT_LABEL="general" ;;
+    agent:*)       AGENT_EMOJI="🛠" ; AGENT_LABEL="${AGENT#agent:}" ;;
+    user-agent:*)  AGENT_EMOJI="🛠" ; AGENT_LABEL="${AGENT#user-agent:}" ;;
+    mcp:*)         AGENT_EMOJI="🔌" ; AGENT_LABEL="$AGENT" ;;
+    *)             AGENT_EMOJI="" ; AGENT_LABEL="" ;;
+  esac
+  [ -n "$AGENT_EMOJI" ] && AGENT_SEG="${AGENT_EMOJI} ${AGENT_LABEL}"
+fi
+
+# ── Compose statusline ──────────────────────────────────────────────────
+SEGMENTS=()
+[ -n "$MODEL_LABEL" ] && [ "$MODEL_LABEL" != "—" ] && SEGMENTS+=("🤖 ${MODEL_LABEL}")
+SEGMENTS+=("📁 ${FOLDER}")
+SEGMENTS+=("🌿 ${BRANCH}")
+[ -n "$PHASE_SEG" ] && SEGMENTS+=("$PHASE_SEG")
+[ -n "$MNEMOS_SEG" ] && SEGMENTS+=("$MNEMOS_SEG")
+[ -n "$SESSION_SEG" ] && SEGMENTS+=("$SESSION_SEG")
+[ -n "$AGENT_SEG" ] && SEGMENTS+=("$AGENT_SEG")
+
+# Join with " │ "
+IFS=" │ "
+echo "${SEGMENTS[*]}"
