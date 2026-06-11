@@ -19,6 +19,14 @@ All three read from the same data layer:
 - `<project>/.phase.json` (current phase + start timestamp + active ticket — owned by this repo)
 - `<project>/.mnemos-state.json` (curated state per MNEMOS's curation contract)
 
+### What it looks like
+
+**SwiftBar menu bar (compact) + dropdown (all projects):**
+
+![SwiftBar dropdown showing all enrolled MNEMOS projects with per-project agent, snap count, context tokens, and open Jira tickets](docs/screenshots/swiftbar-dropdown.png)
+
+See [`docs/screenshots/`](docs/screenshots/) for more captures of the three surfaces.
+
 ## What it tracks
 
 The combined statusline display, all rendered from `.phase.json` + MNEMOS cache:
