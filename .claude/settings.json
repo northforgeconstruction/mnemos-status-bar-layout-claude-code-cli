@@ -1,0 +1,53 @@
+{
+  "mnemos": {
+    "profile": "ai-infra",
+    "smart_commit_mode": "warn",
+    "jira_project_key": "MNEM"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/poum/.mnemos/hooks/session-start.sh",
+            "timeout": 45
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/poum/.mnemos/hooks/pre-compact.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/poum/.mnemos/hooks/post-compact.sh",
+            "timeout": 25
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/poum/.mnemos/hooks/session-end.sh",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
