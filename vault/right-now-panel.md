@@ -24,6 +24,7 @@ Use Obsidian's callout syntax. Callout type matches phase per the design system.
 > [!success] 🎯 Build · obsidian-operator
 > - **Phase**: 🎯 Build since 2026-06-11 09:00 (3d 5h)
 > - **Ticket**: [[OBS-3]] · Portfolio Dataview query
+> - **Active agent**: 🔍 Explore (claude-installed) · since 14:32 (12s ago)
 > - **Session**: 2h 14m · $0.42 (89% cached)
 > - **MNEMOS**: 4 snaps · 18K rehydration payload
 > - **Mode**: Auto-accept (recommended for Build)

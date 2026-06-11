@@ -51,7 +51,7 @@ Emojis must be consistent across all three surfaces. Add to this table before us
 | Symbol | Meaning | Where it appears |
 |---|---|---|
 | 🧠 | MNEMOS-the-system itself | Statusline prefix when MNEMOS data; SwiftBar menu bar icon |
-| 🤖 | Claude / model | Statusline model field |
+| 🤖 | Main Claude orchestrator (active agent) | Statusline model field; agent field when `claude` |
 | 📁 | Folder / project | Statusline folder field |
 | 🌿 | Git branch | Statusline branch field |
 | 💭 | Phase: Plan/Concept | Phase indicator everywhere |
@@ -63,6 +63,13 @@ Emojis must be consistent across all three surfaces. Add to this table before us
 | 💰 | Cost / billing | Statusline cost field |
 | 📸 | Snapshot count | MNEMOS data summary |
 | 🎫 | Jira ticket count | MNEMOS data summary |
+| 🔍 | Subagent: Explore | Active agent (claude-installed) |
+| 📐 | Subagent: Plan | Active agent (claude-installed) |
+| 🧰 | Subagent: general-purpose | Active agent (claude-installed) |
+| 🛠 | Subagent: user-installed (any) | Active agent (user-installed) |
+| 🔌 | MCP service active | Active agent (mcp:*) |
+| 👤 | Human directly editing | Active agent |
+| 💤 | Idle / no active agent | Active agent (default) |
 | ✓ | Success / done | Inline confirmations |
 | ✗ | Failure / blocked | Inline error |
 | ⚠️ | Warning, mode mismatch | Banner output |
@@ -70,6 +77,37 @@ Emojis must be consistent across all three surfaces. Add to this table before us
 | — | No data / not applicable | When a field is intentionally blank |
 
 **Don't use:** any other emoji without adding it here first. Drift in vocabulary defeats the cross-surface consistency.
+
+### Agent categories (active-agent.json)
+
+The `active-agent.json` data file tracks which actor is doing work in a project. Four top-level categories drive display grouping + color:
+
+| Category | Pattern | Examples | Color token | Display in statusline |
+|---|---|---|---|---|
+| **Orchestrator** | `claude` | Main Claude Code session | `--navy` | `🤖 Claude` |
+| **Claude-installed subagent** | `agent:<role>` | `agent:Explore`, `agent:Plan`, `agent:general-purpose` | `--green-active` | `🔍 Explore`, `📐 Plan`, `🧰 general-purpose` |
+| **User-installed subagent** | `user-agent:<name>` | `user-agent:my-reviewer`, `user-agent:doc-linter` | `--cyan-plan` | `🛠 my-reviewer` (with tooltip indicating user-installed) |
+| **MCP service** | `mcp:<service>` | `mcp:atlassian`, `mcp:github`, `mcp:chrome-devtools` | `--purple-cowork` | `🔌 mcp:atlassian` |
+| Human | `human` | Direct file edit by Phyrom | `--navy` | `👤 human` |
+| Daemon | `mnemos-daemon` | Future MNEMOS background process | `--gray-idle` | `🧠 daemon` |
+| Idle | `idle` | No activity in the last N seconds | `--gray-idle` | `💤 idle` |
+
+**Why distinguish user-installed from Claude-installed:**
+
+- Audit + accountability — user-installed agents are owned by the user; Claude-installed are owned by Anthropic/Claude Code
+- Permission/RBAC context — different defaults may apply per category
+- Cost attribution — different agents may have different rate cards
+- Mental model — "what subprocess is touching my work, and did I write it?"
+
+### Agent state semantics
+
+| State | When | Display |
+|---|---|---|
+| **Active** | Agent currently mid-tool-call | Full color, full label |
+| **Recently active** | Last activity within 60 sec | Full color, full label |
+| **Stale** | Last activity 60-300 sec ago | Dimmed (`--gray-idle`), label intact |
+| **Idle** | No activity for >300 sec | `💤 idle` |
+| **Unknown** | Agent name not in vocabulary | `❓ <name>` — surfaces the drift so it can be added to the vocabulary table |
 
 ---
 

@@ -13,6 +13,7 @@ A sibling of [MNEMOS](https://github.com/northforgeconstruction/mnemos) that ren
 All three read from the same data layer:
 
 - `~/.mnemos/cache/<project>/` (MNEMOS's own snapshot + jira-open-tickets + history)
+- `~/.mnemos/cache/<project>/active-agent.json` (current agent + transitions — owned by this repo, schema in `schemas/active-agent.schema.json`)
 - `<project>/.phase.json` (current phase + start timestamp + active ticket — owned by this repo)
 - `<project>/.mnemos-state.json` (curated state per MNEMOS's curation contract)
 
@@ -26,8 +27,19 @@ The combined statusline display, all rendered from `.phase.json` + MNEMOS cache:
 
 ```
 Line 1:  🤖 Fable 5 │ 📁 obsidian-operator │ 🌿 vault (Drive) │ 🎯 Build · 6/11 09:00 (3d 5h) · OBS-3
-Line 2:  69K/1M 7% │ 5h 12%·13:10 │ 7d 20%·Mon 15 │ 🧠 4·18K │ ⏱ 2h 14m session │ 💰 $0.42 89%c
+Line 2:  69K/1M 7% │ 5h 12%·13:10 │ 7d 20%·Mon 15 │ 🧠 4·18K │ ⏱ 2h 14m │ 💰 $0.42 89%c │ 🔍 Explore
 ```
+
+The last segment shows the **active agent** — who's actually touching files right now. Possible values:
+
+- `🤖 Claude` — main orchestrator
+- `🔍 Explore` / `📐 Plan` / `🧰 general-purpose` — Claude-installed subagents
+- `🛠 my-reviewer` — user-installed subagent (color cues distinguish)
+- `🔌 mcp:atlassian` — MCP service mid-call
+- `👤 human` — direct file edit (via your editor, not Claude)
+- `💤 idle` — no activity in the last 5 minutes
+
+See `docs/DESIGN_SYSTEM.md` → "Agent categories" for the full taxonomy.
 
 | Field | Source |
 |---|---|

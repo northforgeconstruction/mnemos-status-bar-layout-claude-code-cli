@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# mnemos-agent — set/get the currently-active agent for a project.
+#
+# Writes to ~/.mnemos/cache/<project>/active-agent.json. Designed to be
+# called from PreToolUse / PostToolUse hooks (when those land in Claude Code)
+# but works as a manual CLI too.
+#
+# Usage:
+#   mnemos-agent get                           Compact current agent
+#   mnemos-agent status                        Detail current agent + age
+#   mnemos-agent set <name> [--tool T] [--target X]
+#   mnemos-agent set-idle                      Mark idle (no active agent)
+#   mnemos-agent history                       Recent agent transitions
+#
+# Agent names follow MNEMOS TEAM.md vocabulary:
+#   claude                Main Claude Code orchestrator
+#   human                 Direct human edit
+#   idle                  No activity
+#   agent:<role>          Claude-installed subagent (Explore, Plan, etc.)
+#   user-agent:<name>     User-installed subagent (.claude/agents/)
+#   mcp:<service>         MCP service (atlassian, github, etc.)
+#   mnemos-daemon         Future MNEMOS background process
+
+set -uo pipefail
+
+MNEMOS_HOME="${MNEMOS_HOME:-${HOME}/.mnemos}"
+HISTORY_CAP=20
+
+# ── Project derivation ──────────────────────────────────────────────────
+PROJECT_ID="$(basename "${PWD}" | tr '[:upper:]' '[:lower:]')"
+CACHE_DIR="${MNEMOS_HOME}/cache/${PROJECT_ID}"
+AGENT_FILE="${CACHE_DIR}/active-agent.json"
+mkdir -p "$CACHE_DIR"
+
+# ── Helpers ─────────────────────────────────────────────────────────────
+now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+humanize_age() {
+  local started="$1"
+  local started_epoch now_epoch diff
+  started_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${started%Z}" "+%s" 2>/dev/null || \
+                  date -d "$started" "+%s" 2>/dev/null || echo 0)
+  now_epoch=$(date "+%s")
+  diff=$((now_epoch - started_epoch))
+  if [ "$diff" -lt 60 ]; then
+    echo "${diff}s ago"
+  elif [ "$diff" -lt 3600 ]; then
+    echo "$((diff / 60))m ago"
+  elif [ "$diff" -lt 86400 ]; then
+    echo "$((diff / 3600))h $((diff % 3600 / 60))m ago"
+  else
+    echo "$((diff / 86400))d ago"
+  fi
+}
+
+agent_emoji() {
+  case "$1" in
+    claude)            echo "🤖" ;;
+    human)             echo "👤" ;;
+    idle)              echo "💤" ;;
+    mnemos-daemon)     echo "🧠" ;;
+    agent:Explore)     echo "🔍" ;;
+    agent:Plan)        echo "📐" ;;
+    agent:general-purpose) echo "🧰" ;;
+    agent:*)           echo "🛠" ;;
+    user-agent:*)      echo "🛠" ;;
+    mcp:*)             echo "🔌" ;;
+    *)                 echo "❓" ;;
+  esac
+}
+
+agent_category() {
+  case "$1" in
+    claude)            echo "orchestrator" ;;
+    human)             echo "human" ;;
+    idle)              echo "idle" ;;
+    mnemos-daemon)     echo "daemon" ;;
+    agent:*)           echo "claude-installed" ;;
+    user-agent:*)      echo "user-installed" ;;
+    mcp:*)             echo "mcp" ;;
+    *)                 echo "unknown" ;;
+  esac
+}
+
+agent_label() {
+  # Short label for display (strips prefix)
+  case "$1" in
+    agent:*)      echo "${1#agent:}" ;;
+    user-agent:*) echo "${1#user-agent:}" ;;
+    mcp:*)        echo "$1" ;;  # keep "mcp:" prefix in display
+    *)            echo "$1" ;;
+  esac
+}
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required" >&2; exit 1; }
+}
+
+# ── Commands ────────────────────────────────────────────────────────────
+
+cmd_get() {
+  require_jq
+  if [ ! -f "$AGENT_FILE" ]; then
+    echo "💤 idle"
+    return 0
+  fi
+  local agent
+  agent=$(jq -r '.agent // "idle"' "$AGENT_FILE")
+  echo "$(agent_emoji "$agent") $(agent_label "$agent")"
+}
+
+cmd_status() {
+  require_jq
+  if [ ! -f "$AGENT_FILE" ]; then
+    echo "Agent:    💤 idle"
+    echo "(No agent tracked in this project yet.)"
+    return 0
+  fi
+  local agent started category age
+  agent=$(jq -r '.agent' "$AGENT_FILE")
+  started=$(jq -r '.started_at' "$AGENT_FILE")
+  category=$(jq -r '.category // "unknown"' "$AGENT_FILE")
+  age=$(humanize_age "$started")
+  echo "Agent:    $(agent_emoji "$agent") $(agent_label "$agent")"
+  echo "Category: $category"
+  echo "Since:    $started ($age)"
+  local tool target
+  tool=$(jq -r '.context.tool // empty' "$AGENT_FILE")
+  target=$(jq -r '.context.target // empty' "$AGENT_FILE")
+  [ -n "$tool" ] && echo "Tool:     $tool"
+  [ -n "$target" ] && echo "Target:   $target"
+}
+
+cmd_history() {
+  require_jq
+  [ -f "$AGENT_FILE" ] || { echo "No agent history."; return 0; }
+  echo "Agent transitions (most recent first):"
+  jq -r '.previous | reverse | .[] | "\(.started_at) → \(.ended_at)  \(.agent)"' "$AGENT_FILE" | head -20
+
+  local cur cur_started
+  cur=$(jq -r '.agent' "$AGENT_FILE")
+  cur_started=$(jq -r '.started_at' "$AGENT_FILE")
+  echo "$cur_started → (now)  $cur  ← current"
+}
+
+cmd_set() {
+  require_jq
+  local new_agent="$1"
+  shift
+  local tool="" target="" verb=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tool)   tool="$2"; shift 2 ;;
+      --target) target="$2"; shift 2 ;;
+      --verb)   verb="$2"; shift 2 ;;
+      *) echo "Unknown arg: $1" >&2; return 1 ;;
+    esac
+  done
+
+  local now category
+  now=$(now_iso)
+  category=$(agent_category "$new_agent")
+
+  if [ -f "$AGENT_FILE" ]; then
+    local cur_agent cur_started
+    cur_agent=$(jq -r '.agent' "$AGENT_FILE")
+    cur_started=$(jq -r '.started_at' "$AGENT_FILE")
+    if [ "$cur_agent" = "$new_agent" ]; then
+      # Same agent — just update context, don't rotate history
+      jq --arg now "$now" \
+         --arg tool "$tool" \
+         --arg target "$target" \
+         --arg verb "$verb" \
+         '.context = {
+            tool: (if $tool == "" then null else $tool end),
+            target: (if $target == "" then null else $target end),
+            verb: (if $verb == "" then null else $verb end)
+          }' "$AGENT_FILE" > "${AGENT_FILE}.tmp" && mv "${AGENT_FILE}.tmp" "$AGENT_FILE"
+      return 0
+    fi
+    # Different agent — archive current to previous, write new current
+    jq --arg new_agent "$new_agent" \
+       --arg now "$now" \
+       --arg category "$category" \
+       --arg tool "$tool" \
+       --arg target "$target" \
+       --arg verb "$verb" \
+       --arg cur_agent "$cur_agent" \
+       --arg cur_started "$cur_started" \
+       --argjson cap "$HISTORY_CAP" \
+       '{
+          schema_version: "1.0",
+          agent: $new_agent,
+          category: $category,
+          started_at: $now,
+          context: {
+            tool: (if $tool == "" then null else $tool end),
+            target: (if $target == "" then null else $target end),
+            verb: (if $verb == "" then null else $verb end)
+          },
+          previous: ((.previous // []) + [{
+            agent: $cur_agent,
+            started_at: $cur_started,
+            ended_at: $now,
+            context: .context
+          }]) | .[-($cap)..]
+        }' "$AGENT_FILE" > "${AGENT_FILE}.tmp" && mv "${AGENT_FILE}.tmp" "$AGENT_FILE"
+  else
+    jq -n --arg agent "$new_agent" \
+          --arg now "$now" \
+          --arg category "$category" \
+          --arg tool "$tool" \
+          --arg target "$target" \
+          --arg verb "$verb" \
+          '{
+            schema_version: "1.0",
+            agent: $agent,
+            category: $category,
+            started_at: $now,
+            context: {
+              tool: (if $tool == "" then null else $tool end),
+              target: (if $target == "" then null else $target end),
+              verb: (if $verb == "" then null else $verb end)
+            },
+            previous: []
+          }' > "$AGENT_FILE"
+  fi
+
+  # Log event for MNEMOS observability
+  local mnemos_log="${MNEMOS_HOME}/hooks/lib/log-event.sh"
+  if [ -f "$mnemos_log" ]; then
+    # shellcheck source=/dev/null
+    . "$mnemos_log"
+    MNEMOS_CWD="$PWD" log_event "agent_transition" \
+      "agent=${new_agent}" \
+      "category=${category}" \
+      "tool=${tool:-none}"
+  fi
+}
+
+cmd_set_idle() { cmd_set "idle"; }
+
+# ── Dispatch ────────────────────────────────────────────────────────────
+CMD="${1:-status}"
+shift 2>/dev/null || true
+
+case "$CMD" in
+  get)      cmd_get ;;
+  status)   cmd_status ;;
+  history)  cmd_history ;;
+  set)
+    [ $# -ge 1 ] || { echo "Usage: mnemos-agent set <name> [--tool T] [--target X]" >&2; exit 1; }
+    cmd_set "$@"
+    ;;
+  set-idle) cmd_set_idle ;;
+  -h|--help|help)
+    sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
+    ;;
+  *)
+    echo "Unknown command: $CMD" >&2
+    echo "Usage: mnemos-agent {get|status|history|set <name>|set-idle}" >&2
+    exit 1
+    ;;
+esac

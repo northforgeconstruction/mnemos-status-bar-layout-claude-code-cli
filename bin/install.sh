@@ -83,6 +83,13 @@ if [ -f "$REPO_DIR/bin/mnemos-session-setup" ]; then
   ok "Installed $INSTALL_BIN/mnemos-session-setup"
 fi
 
+# Also install mnemos-agent (active-agent tracking CLI)
+if [ -f "$REPO_DIR/bin/mnemos-agent" ]; then
+  cp "$REPO_DIR/bin/mnemos-agent" "$INSTALL_BIN/mnemos-agent"
+  chmod +x "$INSTALL_BIN/mnemos-agent"
+  ok "Installed $INSTALL_BIN/mnemos-agent"
+fi
+
 if [[ ":$PATH:" != *":$INSTALL_BIN:"* ]]; then
   warn "$INSTALL_BIN not on PATH"
   info "Add to your shell config (e.g., ~/.zshrc or ~/.bashrc):"

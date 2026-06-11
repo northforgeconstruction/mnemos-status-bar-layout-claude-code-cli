@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/northforgeconstruction/mnemos-status-bar-layout/schemas/active-agent.schema.json",
+  "title": "MNEMOS Active Agent",
+  "description": "Records which actor is currently doing work in a project. Lives at ~/.mnemos/cache/<project>/active-agent.json. Updated by hooks on every tool invocation; read by statusline, SwiftBar, and vault panel.",
+  "type": "object",
+  "required": ["agent", "started_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "agent": {
+      "type": "string",
+      "description": "Identifier of the currently-active agent. Follows TEAM.md naming.",
+      "examples": [
+        "claude",
+        "human",
+        "idle",
+        "agent:Explore",
+        "agent:Plan",
+        "agent:general-purpose",
+        "user-agent:my-reviewer",
+        "mcp:atlassian",
+        "mcp:github",
+        "mnemos-daemon"
+      ],
+      "pattern": "^(claude|human|idle|mnemos-daemon|(agent|user-agent|mcp):[A-Za-z0-9_-]+)$"
+    },
+    "category": {
+      "type": "string",
+      "enum": ["orchestrator", "claude-installed", "user-installed", "mcp", "human", "daemon", "idle"],
+      "description": "Top-level category for display grouping."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when this agent became active."
+    },
+    "context": {
+      "type": "object",
+      "description": "What the agent is doing right now (best-effort).",
+      "additionalProperties": true,
+      "properties": {
+        "tool": {
+          "type": "string",
+          "description": "Tool name being invoked (Edit, Write, Bash, etc.)"
+        },
+        "verb": {
+          "type": "string",
+          "description": "Action verb (read, modify, create, transition, etc.)"
+        },
+        "target": {
+          "type": "string",
+          "description": "Resource being touched (file path, Jira key, repo name, etc.)"
+        }
+      }
+    },
+    "previous": {
+      "type": "array",
+      "description": "Most recent agent transitions (bounded to last N entries; default 20).",
+      "items": {
+        "type": "object",
+        "required": ["agent", "started_at", "ended_at"],
+        "properties": {
+          "agent": { "type": "string" },
+          "started_at": { "type": "string", "format": "date-time" },
+          "ended_at": { "type": "string", "format": "date-time" },
+          "context": { "type": "object" }
+        }
+      }
+    }
+  }
+}
