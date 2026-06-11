@@ -1,6 +1,8 @@
-# MNEMOS Status Bar Layout
+# MNEMOS Status Bar Layout — Claude Code CLI
 
 > Three surfaces, one source of truth. Phase + session state visible everywhere you look.
+>
+> This is the **Claude Code CLI** variant. Other agent harnesses (Claude Desktop, Codex, Gemini) get their own variants when the data layer stabilizes.
 
 A sibling of [MNEMOS](https://github.com/northforgeconstruction/mnemos) that renders MNEMOS state across three operator surfaces:
 
@@ -16,10 +18,6 @@ All three read from the same data layer:
 - `~/.mnemos/cache/<project>/active-agent.json` (current agent + transitions — owned by this repo, schema in `schemas/active-agent.schema.json`)
 - `<project>/.phase.json` (current phase + start timestamp + active ticket — owned by this repo)
 - `<project>/.mnemos-state.json` (curated state per MNEMOS's curation contract)
-
-## Why this is a separate repo
-
-Per [MNEMOS](https://github.com/northforgeconstruction/mnemos)'s 2026-06-11 repositioning, the "session-rehydration layer" framing is now table stakes (Anthropic ships auto memory natively). MNEMOS's actual moat is **cross-system state orchestration** — Jira + Obsidian + Claude Code + MCP in one coherent state. This repo is the **operator-visible surface** of that orchestration. Every glance reinforces the moat.
 
 ## What it tracks
 
