@@ -1,14 +1,18 @@
-# CLAUDE.md — MNEMOS Status Bar Layout
+# CLAUDE.md — MNEMOS Status Bar Layout · Claude Code CLI
 
 ## What this repo is
 
-Sibling of [northforgeconstruction/mnemos](https://github.com/northforgeconstruction/mnemos). Renders MNEMOS state across three surfaces:
+**The Claude Code CLI variant** of MNEMOS Status Bar Layout. Sibling of [northforgeconstruction/mnemos](https://github.com/northforgeconstruction/mnemos). Renders MNEMOS state across three operator surfaces:
 
 1. Terminal statusline (extends `hostfin-statusline.sh`)
 2. macOS menu bar (SwiftBar plugin)
 3. Obsidian vault panel (Dataview block)
 
-All three read from `~/.mnemos/cache/<project>/` + `<project>/.phase.json`.
+All three read from `~/.mnemos/cache/<project>/` + `<project>/.phase.json` + `<project>/active-agent.json`.
+
+### Variant scope
+
+This repo is the **Claude Code CLI** variant. Future harnesses (Claude Desktop, Codex CLI, Gemini CLI) will get their own variant repos sharing the schemas in `schemas/` and the design system in `docs/DESIGN_SYSTEM.md`. Renderers differ per harness; the data layer is portable. Don't add Claude-Desktop / Codex / Gemini renderers here — they belong in their own variant repos when the data layer is stable enough to be reused.
 
 ## Where context lives
 
@@ -74,6 +78,7 @@ Do NOT silently proceed in the wrong mode. Wrong-mode work is an error class (e.
 - **Don't fork MNEMOS's data layer.** This repo READS from `~/.mnemos/cache/`; it doesn't write there. MNEMOS owns its own cache.
 - **Don't add a fourth surface (web app, mobile, etc.) yet.** Three surfaces × one data layer is the discipline. Get the three solid before expanding.
 - **Don't let renderers diverge.** All three use the same field names from `.phase.json` and the same lookup paths from `~/.mnemos/cache/`. Drift here defeats the purpose.
+- **Don't add Claude Desktop / Codex / Gemini renderers here.** Those belong in their own variant repos (e.g., `mnemos-status-bar-layout-claude-desktop`) once the data layer is stable. This repo is scoped to Claude Code CLI.
 - **Don't add new emojis, colors, or symbols without updating `docs/DESIGN_SYSTEM.md` first.** The icon vocabulary table is the contract. Adding a new glyph in code before adding it to the table = design drift.
 - **Don't use color alone for state.** Every state cue must pair color + symbol + text (accessibility + monochrome-terminal compatibility).
 - **Don't invent values when data is missing.** Show "—" (em-dash). Showing "0" or fake numbers breaks trust in the rendered state.
@@ -81,5 +86,6 @@ Do NOT silently proceed in the wrong mode. Wrong-mode work is an error class (e.
 ## References
 
 - Sibling repo: github.com/northforgeconstruction/mnemos
+- Renamed to: `mnemos-status-bar-layout-claude-code-cli` (was `mnemos-status-bar-layout`) on 2026-06-11. GitHub keeps the old URL redirecting for ~30 days.
 - Operator vault product note for this work: TBD
 - Jira: MNEM (https://bldsync.atlassian.net/jira/software/projects/MNEM) — file new tickets under MNEM with `tag:mnemos-status-bar-layout` for now until we split into its own project
