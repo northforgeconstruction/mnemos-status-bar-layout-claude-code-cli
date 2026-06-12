@@ -1,14 +1,20 @@
 {
   "schema_version": "1.0",
-  "phase": "deploy",
-  "started_at": "2026-06-11T21:15:53Z",
-  "ticket": "MNEM-83",
+  "phase": "maintenance",
+  "started_at": "2026-06-12T00:50:58Z",
+  "ticket": "MNEM-84",
   "previous": [
     {
       "phase": "build",
       "started_at": "2026-06-11T17:53:19Z",
       "ended_at": "2026-06-11T21:15:53Z",
       "ticket": "MNEM-75"
+    },
+    {
+      "phase": "deploy",
+      "started_at": "2026-06-11T21:15:53Z",
+      "ended_at": "2026-06-12T00:50:58Z",
+      "ticket": "MNEM-83"
     }
   ],
   "notes": ""
